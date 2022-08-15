@@ -1,0 +1,13 @@
+library identifier: 'jenkins-pipeline-library@master', 
+	retriever: modernSCM(github(apiUri: 'https://dummyurl.com', credentialsId: 'GitHub', traits: [gitHubBranchDiscovery(1), gitHubPullRequestDiscovery(1), gitHubForkDiscovery(strategyId: 1, trust: gitHubTrustPermissions())], repository: 'jenkins-pipeline-library', repoOwner: 'neditappdev'))
+
+dotnetFrameworkPipeline solutionFile: 'AppExample.sln',
+	webProjName: AppExample
+	baseVersionNumber: '1.41.0',
+	vsDebugConfigName: 'Development_02',
+	vsReleaseConfigName: 'Staging_02',
+	octopusProjName: 'App Example',
+	octopusEnvironment: 'Development_02',
+	hasTests: 'false',
+	debugTestFilePath: '',
+	releaseTestFilePath: ''
