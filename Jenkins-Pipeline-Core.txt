@@ -1,0 +1,234 @@
+def call(Map config) {
+	node {
+    env.solutionFile = "${config.solutionFile}"
+		env.project1Name = "${config.project1Name}"
+		env.project2Name = "${config.project2Name}"
+		env.project3Name = "${config.project3Name}"
+		env.project4Name = "${config.project4Name}"
+		env.project1Version = "${config.project1Version}" + ".${BUILD_NUMBER}"
+		env.project2Version = "${config.project2Version}" + ".${BUILD_NUMBER}"
+		env.project3Version = "${config.project3Version}" + ".${BUILD_NUMBER}"
+		env.project4Version = "${config.project4Version}" + ".${BUILD_NUMBER}"
+		env.project1PublishCmdArgs = "${config.project1PublishCmdArgs}"
+		env.project2PublishCmdArgs = "${config.project2PublishCmdArgs}"
+		env.project3PublishCmdArgs = "${config.project3PublishCmdArgs}"
+		env.project4PublishCmdArgs = "${config.project4PublishCmdArgs}"
+		env.octopusProject1Name = "${config.octopusProject1Name}"
+		env.octopusProject2Name = "${config.octopusProject2Name}"
+		env.octopusProject3Name = "${config.octopusProject3Name}"
+		env.octopusProject4Name = "${config.octopusProject4Name}"
+		env.octopusEnvironment = "${config.octopusEnvironment}"
+		env.testFilePath = "${config.testFilePath}"
+		// Should be netcoreapp3.1, net6.0, or similar
+		env.dotNetVersion = "${config.dotNetVersion}"	
+
+		env.sonarCube = tool name: 'Sonar Scanner .Net Fwk 4.6', type: 'hudson.plugins.sonar.MsBuildSQRunnerInstallation'
+		env.dotNetPath = ""
+
+		try {
+				
+			stage('Pre-Build') {
+				echo "Building ${JOB_NAME} from ${WORKSPACE}"
+				echo "Build number: ${BUILD_NUMBER}"
+				echo "Branch: ${BRANCH_NAME}"
+				echo "Solution File: ${solutionFile}"
+				
+				// If you don't do this, test results don't get wiped and builds will always show unstable after a test failure
+				// This also messes with Whitesource
+				echo 'Cleaning up workspace'
+				
+				// Cleanup workspace (by default Jenkins leaves files in workspace after builds)
+				cleanWs()
+
+				// Get main source
+				checkout scm
+			}
+
+			stage('SonarQube Scan Start') {
+				echo 'Adding ProjectGUID for SonarQube'
+				powershell '''$paths = Get-ChildItem -include *.csproj -Recurse
+					foreach($pathobject in $paths) 
+					{
+						 $path = $pathobject.fullname
+						 $doc = New-Object System.Xml.XmlDocument
+						 $doc.Load($path)
+						 $child = $doc.CreateElement("ProjectGuid")
+						 $child.InnerText = [guid]::NewGuid().ToString().ToUpper()
+						 $node = $doc.SelectSingleNode("//Project/PropertyGroup")
+						 $node.AppendChild($child)
+						 $doc.Save($path)
+					}'''
+					
+				if (!env.project1Name.isEmpty()) {
+					withSonarQubeEnv(installationName: 'SonarQube', credentialsId: 'key') {
+						bat "\"${sonarCube}\\SonarScanner.MSBuild.exe\" begin /k:$project1Name \"/n:$project1Name\" /v:trunk /d:sonar.host.url=https://dummyurl.com/"
+					}
+				}
+			}
+			
+			//Install .net 6.x if necessary
+			if (env.dotNetVersion.indexOf("net6") != -1){
+				stage('Install 6.0 SDK') {
+					powershell "f:\\tools\\dotnet-install.ps1 -InstallDir ${WORKSPACE}\\.dotnet -Channel 6.0.1xx"
+					env.dotNetPath = "${WORKSPACE}\\.dotnet\\"
+				}
+			}
+
+			stage('Restore Packages') {
+				bat "${dotNetPath}dotnet restore $solutionFile --source \"https://dummyurl.com;\\\\DUMMY\FilePath\""
+			}
+
+			
+
+			stage('Build 1') {
+				if (!env.project1Name.isEmpty()) {
+					bat "${dotNetPath}dotnet build ${project1Name}\\${project1Name}.csproj --no-restore -c Release /p:Version=${project1Version}"
+				}
+			}	
+			stage('Build 2') {
+				if (!env.project2Name.isEmpty()) {
+					bat "${dotNetPath}dotnet build ${project2Name}\\${project2Name}.csproj --no-restore -c Release /p:Version=${project2Version}"
+				}
+			}	
+			stage('Build 3') {
+				if (!env.project3Name.isEmpty()) {
+					bat "${dotNetPath}dotnet build ${project3Name}\\${project3Name}.csproj --no-restore -c Release /p:Version=${project3Version}"
+				}
+			}	
+			stage('Build 4') {
+				if (!env.project4Name.isEmpty()) {
+					bat "${dotNetPath}dotnet build ${project4Name}\\${project4Name}.csproj --no-restore -c Release /p:Version=${project4Version}"
+				}
+			}	
+
+			stage('SonarQube Scan End') {
+				if (!env.project1Name.isEmpty()) {
+					withSonarQubeEnv(installationName: 'SonarQube', credentialsId: '') {
+						bat "\"${sonarCube}\\SonarScanner.MSBuild.exe\" end"
+					}
+				}
+			}
+			
+			stage('Whitesource Scan') {
+				if (!env.project1Name.isEmpty()) {
+					withCredentials([string(credentialsId: 'whitesource-api-key', variable: 'whitesourceAPIKey')]) {
+						powershell "f:\\tools\\whitesource\\wss-run.ps1 -project $project1Name -apiKey ${whitesourceAPIKey}"
+					}
+				}
+			}
+
+			stage('Test') {
+				if (!env.testFilePath.isEmpty()) {
+					bat "${dotNetPath}dotnet test --no-restore"
+				}
+			}
+			
+			stage('Push to Deploy 1') {
+				if (!env.project1Name.isEmpty()) {
+					bat "${dotNetPath}dotnet publish ${project1Name}\\${project1Name}.csproj --no-restore -c Release ${project1PublishCmdArgs} /p:Version=${project1Version}"
+					
+					def runtimeId = env.project1PublishCmdArgs.split("-r")[-1].trim()
+					def pubPath = "${WORKSPACE}\\${project1Name}\\bin\\Release\\${dotNetVersion}\\publish"
+					
+					if (!runtimeId.isEmpty()) {
+						pubPath = "${WORKSPACE}\\${project1Name}\\bin\\Release\\${dotNetVersion}\\${runtimeId}\\publish"
+					}
+					
+					octopusPack additionalArgs: '', outputPath: "${WORKSPACE}", packageFormat: 'nuget', packageId: "${project1Name}", packageVersion: "${project1Version}", sourcePath: "${pubPath}", toolId: 'Octopus.DotNet.Cli'
+					octopusPushPackage additionalArgs: '', overwriteMode: 'OverwriteExisting', packagePaths: "${WORKSPACE}\\${project1Name}.${project1Version}.nupkg", serverId: 'NED Octopus', spaceId: '', toolId: 'Octopus.DotNet.Cli'
+				}
+			}	
+			stage('Push to Deploy 2') {
+				if (!env.project2Name.isEmpty()) {
+					bat "${dotNetPath}dotnet publish ${project2Name}\\${project2Name}.csproj --no-restore -c Release ${project2PublishCmdArgs} /p:Version=${project2Version}"
+					
+					def runtimeId = env.project2PublishCmdArgs.split("-r")[-1].trim()
+					def pubPath = "${WORKSPACE}\\${project2Name}\\bin\\Release\\${dotNetVersion}\\publish"
+					
+					if (!runtimeId.isEmpty()) {
+						pubPath = "${WORKSPACE}\\${project2Name}\\bin\\Release\\${dotNetVersion}\\${runtimeId}\\publish"
+					}
+					
+					octopusPack additionalArgs: '', outputPath: "${WORKSPACE}", packageFormat: 'nuget', packageId: "${project2Name}", packageVersion: "${project2Version}", sourcePath: "${pubPath}", toolId: 'Octopus.DotNet.Cli'
+					octopusPushPackage additionalArgs: '', overwriteMode: 'OverwriteExisting', packagePaths: "${WORKSPACE}\\${project2Name}.${project2Version}.nupkg", serverId: 'NED Octopus', spaceId: '', toolId: 'Octopus.DotNet.Cli'
+				}
+			}	
+			
+			stage('Push to Deploy 3') {
+				if (!env.project3Name.isEmpty()) {
+					bat "${dotNetPath}dotnet publish ${project3Name}\\${project3Name}.csproj --no-restore -c Release ${project3PublishCmdArgs} /p:Version=${project3Version}"
+					
+					def runtimeId = env.project3PublishCmdArgs.split("-r")[-1].trim()
+					def pubPath = "${WORKSPACE}\\${project3Name}\\bin\\Release\\${dotNetVersion}\\publish"
+					
+					if (!runtimeId.isEmpty()) {
+						pubPath = "${WORKSPACE}\\${project3Name}\\bin\\Release\\${dotNetVersion}\\${runtimeId}\\publish"
+					}
+					
+					octopusPack additionalArgs: '', outputPath: "${WORKSPACE}", packageFormat: 'nuget', packageId: "${project3Name}", packageVersion: "${project3Version}", sourcePath: "${pubPath}", toolId: 'Octopus.DotNet.Cli'
+					octopusPushPackage additionalArgs: '', overwriteMode: 'OverwriteExisting', packagePaths: "${WORKSPACE}\\${project3Name}.${project3Version}.nupkg", serverId: 'NED Octopus', spaceId: '', toolId: 'Octopus.DotNet.Cli'
+				}
+			}	
+			
+			stage('Push to Deploy 4') {
+				if (!env.project4Name.isEmpty()) {
+					bat "${dotNetPath}dotnet publish ${project4Name}\\${project4Name}.csproj --no-restore -c Release ${project4PublishCmdArgs} /p:Version=${project4Version}"
+					
+					def runtimeId = env.project4PublishCmdArgs.split("-r")[-1].trim()
+					def pubPath = "${WORKSPACE}\\${project4Name}\\bin\\Release\\${dotNetVersion}\\publish"
+					
+					if (!runtimeId.isEmpty()) {
+						pubPath = "${WORKSPACE}\\${project4Name}\\bin\\Release\\${dotNetVersion}\\${runtimeId}\\publish"
+					}
+					
+					octopusPack additionalArgs: '', outputPath: "${WORKSPACE}", packageFormat: 'nuget', packageId: "${project4Name}", packageVersion: "${project4Version}", sourcePath: "${pubPath}", toolId: 'Octopus.DotNet.Cli'
+					octopusPushPackage additionalArgs: '', overwriteMode: 'OverwriteExisting', packagePaths: "${WORKSPACE}\\${project4Name}.${project4Version}.nupkg", serverId: 'NED Octopus', spaceId: '', toolId: 'Octopus.DotNet.Cli'
+				}
+			}	
+			
+			// Deploys go automatically to DEV; for deploying to TST and above, you must do it manually through Octopus UI
+			stage('Deploy 1') {
+				if (!env.octopusProject1Name.isEmpty() && env.BRANCH_NAME != 'master') {
+					octopusCreateRelease additionalArgs: '', channel: '', defaultPackageVersion: "${project1Version}", deployThisRelease: true, deploymentTimeout: '', environment: "${octopusEnvironment}", project: "${octopusProject1Name}", releaseNotesFile: '', releaseVersion: "${project1Version}", serverId: 'NED Octopus', spaceId: '', tenant: '', tenantTag: '', toolId: 'Octopus.DotNet.Cli', variables: '', waitForDeployment: true
+				}
+			}	
+			stage('Deploy 2') {
+				if (!env.octopusProject2Name.isEmpty() && env.BRANCH_NAME != 'master') {
+					octopusCreateRelease additionalArgs: '', channel: '', defaultPackageVersion: "${project2Version}", deployThisRelease: true, deploymentTimeout: '', environment: "${octopusEnvironment}", project: "${octopusProject2Name}", releaseNotesFile: '', releaseVersion: "${project2Version}", serverId: 'NED Octopus', spaceId: '', tenant: '', tenantTag: '', toolId: 'Octopus.DotNet.Cli', variables: '', waitForDeployment: true
+				}
+			}	
+			
+			stage('Deploy 3') {
+				if (!env.octopusProject3Name.isEmpty() && env.BRANCH_NAME != 'master') {
+					octopusCreateRelease additionalArgs: '', channel: '', defaultPackageVersion: "${project3Version}", deployThisRelease: true, deploymentTimeout: '', environment: "${octopusEnvironment}", project: "${octopusProject3Name}", releaseNotesFile: '', releaseVersion: "${project3Version}", serverId: 'NED Octopus', spaceId: '', tenant: '', tenantTag: '', toolId: 'Octopus.DotNet.Cli', variables: '', waitForDeployment: true
+				}
+			}	
+			
+			stage('Deploy 4') {
+				if (!env.octopusProject4Name.isEmpty() && env.BRANCH_NAME != 'master') {
+					octopusCreateRelease additionalArgs: '', channel: '', defaultPackageVersion: "${project4Version}", deployThisRelease: true, deploymentTimeout: '', environment: "${octopusEnvironment}", project: "${octopusProject4Name}", releaseNotesFile: '', releaseVersion: "${project4Version}", serverId: 'NED Octopus', spaceId: '', tenant: '', tenantTag: '', toolId: 'Octopus.DotNet.Cli', variables: '', waitForDeployment: true
+				}
+			}	
+
+		}
+		catch (exc) {
+			echo 'Build failed'
+		}
+		finally {
+			if (currentBuild.result == 'UNSTABLE') {
+					echo 'Build unstable'
+			} else {
+					echo 'Build finished successfully'
+			}
+		}
+
+	}	
+}
+© 2022 GitHub, Inc.
+Help
+Support
+API
+Training
+Blog
+About
+GitHub Enterprise Server 3.3.9
